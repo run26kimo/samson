@@ -95,6 +95,7 @@ class DeployService
     execute_and_log_errors(deploy) { send_deploy_email(deploy) }
     execute_and_log_errors(deploy) { send_failed_deploy_email(deploy) }
     execute_and_log_errors(deploy) { notify_outbound_webhooks(deploy) }
+    execute_and_log_errors(deploy) { tag_docker_images(deploy) }
   end
   add_method_tracer :send_after_notifications
 
@@ -121,5 +122,26 @@ class DeployService
 
   def send_sse_deploy_update(type, deploy)
     SseRailsEngine.send_event('deploys', type: type, deploy: DeploySerializer.new(deploy, root: nil))
+  end
+
+  # TODO: make this work with remote images too ... and images where the local image no longer exists
+  def tag_docker_images(deploy)
+    return unless ENV["DOCKER_FEATURE"]
+    return unless deploy.succeeded?
+    return unless builds = deploy.project.builds.
+      where(git_sha: deploy.job.commit).where.not(docker_image_id: nil).presence
+    tags = [deploy.stage.permalink].concat deploy.stage.deploy_groups.map(&:permalink)
+
+    builds.each do |build|
+      begin
+        service = DockerBuilderService.new(build)
+        tags.each do |tag|
+          output = service.push_tag tag
+          deploy.job.append_output! output
+        end
+      rescue Docker::Error::NotFoundError # local image was deleted
+        deploy.job.append_output! "Failed to find local docker image"
+      end
+    end
   end
 end
